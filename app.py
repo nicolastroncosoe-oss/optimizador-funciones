@@ -43,6 +43,7 @@ if st.button("Optimizar"):
 
         x = x0.copy()
         historial = []
+        trayectoria = [x.copy()]
         tol = float(tolerancia)
 
         if metodo == "Gradiente":
@@ -55,6 +56,7 @@ if st.button("Optimizar"):
                 p = -g
                 alpha = wolfe_search(x, p, f, grad, c1, c2)
                 x = x + alpha * p
+                trayectoria.append(x.copy())
 
         elif metodo == "Gradiente Conjugado":
             g = grad(x)
@@ -70,6 +72,7 @@ if st.button("Optimizar"):
                 beta = max(0, np.dot(g_new, g_new - g) / np.dot(g, g))
                 p = -g_new + beta * p
                 x, g = x_new, g_new
+                trayectoria.append(x.copy())
 
         elif metodo == "Newton":
             for i in range(int(max_iter)):
@@ -85,6 +88,7 @@ if st.button("Optimizar"):
                     p = -g
                 alpha = wolfe_search(x, p, f, grad, c1, c2)
                 x = x + alpha * p
+                trayectoria.append(x.copy())
 
         st.success("¡Optimización completada!")
         st.write(f"**Punto mínimo:** {x}")
@@ -92,10 +96,44 @@ if st.button("Optimizar"):
         st.write(f"**Iteraciones realizadas:** {len(historial)}")
         st.write(f"**Error final:** {historial[-1]:.2e}")
 
+        # Gráfico de convergencia
+        st.subheader("Convergencia")
         fig = go.Figure()
-        fig.add_trace(go.Scatter(y=historial, mode='lines', name='Error'))
-        fig.update_layout(title='Convergencia', xaxis_title='Iteración', yaxis_title='Error', yaxis_type='log')
+        fig.add_trace(go.Scatter(y=historial, mode='lines+markers', name='Error'))
+        fig.update_layout(xaxis_title='Iteración', yaxis_title='Error', yaxis_type='log')
         st.plotly_chart(fig)
+
+        # Visualización 2D con trayectoria (solo si hay 2 variables)
+        if int(n_vars) == 2:
+            st.subheader("Trayectoria de optimización")
+            trayectoria = np.array(trayectoria)
+            margen = 1.5
+            x_min, x_max = trayectoria[:,0].min() - margen, trayectoria[:,0].max() + margen
+            y_min, y_max = trayectoria[:,1].min() - margen, trayectoria[:,1].max() + margen
+            xx = np.linspace(x_min, x_max, 80)
+            yy = np.linspace(y_min, y_max, 80)
+            X, Y = np.meshgrid(xx, yy)
+            Z = np.zeros_like(X)
+            for i in range(X.shape[0]):
+                for j in range(X.shape[1]):
+                    Z[i,j] = f([X[i,j], Y[i,j]])
+            
+            fig2 = go.Figure()
+            fig2.add_trace(go.Contour(x=xx, y=yy, z=Z, colorscale='Viridis', 
+                                       contours=dict(showlabels=True), name='f(x1,x2)'))
+            fig2.add_trace(go.Scatter(x=trayectoria[:,0], y=trayectoria[:,1], 
+                                       mode='lines+markers', 
+                                       line=dict(color='red', width=2),
+                                       marker=dict(size=8, color='red'),
+                                       name='Trayectoria'))
+            fig2.add_trace(go.Scatter(x=[trayectoria[0,0]], y=[trayectoria[0,1]],
+                                       mode='markers', marker=dict(size=15, color='yellow', symbol='star'),
+                                       name='Inicio'))
+            fig2.add_trace(go.Scatter(x=[trayectoria[-1,0]], y=[trayectoria[-1,1]],
+                                       mode='markers', marker=dict(size=15, color='lime', symbol='star'),
+                                       name='Mínimo'))
+            fig2.update_layout(xaxis_title='x1', yaxis_title='x2', height=600)
+            st.plotly_chart(fig2)
 
     except Exception as e:
         st.error(f"Error: {e}")
