@@ -17,10 +17,6 @@ from sympy.parsing.sympy_parser import (
     standard_transformations,
 )
 
-# -----------------------------------------------------------------------------
-# Constantes numéricas
-# -----------------------------------------------------------------------------
-
 SP_TRANSFORMS = standard_transformations + (
     implicit_multiplication_application,
     convert_xor,
@@ -115,9 +111,7 @@ DEFAULT_EXAMPLE = "Cuadrática simple 2D"
 
 
 def load_example_into_state(example_name: str) -> None:
-    """Carga un ejemplo en session_state de forma controlada."""
     ex = EXAMPLES[example_name]
-
     st.session_state["example_selected"] = example_name
     st.session_state["n_vars"] = int(ex["n"])
     st.session_state["funcion"] = str(ex["f"])
@@ -128,7 +122,6 @@ def load_example_into_state(example_name: str) -> None:
 
 
 def ensure_default_state() -> None:
-    """Inicializa los campos de la interfaz solo la primera vez."""
     if "example_selected" not in st.session_state:
         load_example_into_state(DEFAULT_EXAMPLE)
 
@@ -139,14 +132,9 @@ def ensure_default_state() -> None:
 
 
 def update_c2_recommendation() -> None:
-    """Ajusta c2 al valor recomendado cuando cambia el método."""
     metodo = st.session_state.get("metodo", "Newton")
     st.session_state["c2_input"] = 0.4 if metodo == "Gradiente Conjugado" else 0.9
 
-
-# -----------------------------------------------------------------------------
-# Estructuras
-# -----------------------------------------------------------------------------
 
 @dataclass
 class Objective:
@@ -170,6 +158,16 @@ class Objective:
 
 
 @dataclass
+class AlphaSearchInfo:
+    alpha_inicial: Optional[float] = None
+    alpha_aceptado: Optional[float] = None
+    wolfe_iters: int = 0
+    zoom_iters: int = 0
+    total_internas: int = 0
+    modo_alpha: str = "—"
+
+
+@dataclass
 class IterRecord:
     iteracion: int
     x: np.ndarray
@@ -181,6 +179,11 @@ class IterRecord:
     wolfe_curvatura: Optional[bool] = None
     metodo_paso: str = "—"
     beta: Optional[float] = None
+    alpha_inicial: Optional[float] = None
+    wolfe_iters: int = 0
+    zoom_iters: int = 0
+    total_internas: int = 0
+    modo_alpha: str = "—"
 
 
 @dataclass
@@ -194,14 +197,9 @@ class OptimizationResult:
     best_index: int
 
 
-# -----------------------------------------------------------------------------
-# Utilidades numéricas
-# -----------------------------------------------------------------------------
-
 def fmt(v, fmt_spec: str = ".4e") -> str:
     if v is None:
         return "—"
-
     try:
         vf = float(v)
         if not np.isfinite(vf):
@@ -314,12 +312,6 @@ def classify_hessian(
     tol: Optional[float] = None,
     eig_tol: float = 1e-8,
 ) -> Tuple[str, str, Optional[np.ndarray]]:
-    """Clasifica un punto con la prueba de segundo orden.
-
-    La prueba de Hessiana solamente se aplica cuando el punto es estacionario
-    dentro de la tolerancia. Esto evita clasificar como máximo/mínimo un punto
-    que todavía tiene gradiente grande.
-    """
     stationary_threshold = None
 
     if tol is not None:
@@ -362,18 +354,11 @@ def classify_hessian(
 
 
 def detectar_variables_escritas(funcion: str) -> List[int]:
-    """Detecta variables escritas como x1, x2, x3, etc. en el texto original."""
     tokens = re.findall(r"\bx(\d+)\b", funcion)
     return sorted({int(t) for t in tokens})
 
 
 def parse_objective(funcion: str, n: int) -> Objective:
-    """Interpreta la función objetivo y construye f, gradiente y Hessiana.
-
-    Se detectan primero las variables escritas en el texto original para evitar
-    que SymPy interprete expresiones como x5 como x*5 cuando el usuario eligió
-    menos variables.
-    """
     indices_usados = detectar_variables_escritas(funcion)
 
     if indices_usados:
@@ -392,8 +377,6 @@ def parse_objective(funcion: str, n: int) -> Objective:
 
     variables = tuple(variables)
 
-    # Se registran x1,...,x50 para que el parser no rompa x5 como x*5.
-    # Luego se valida que solamente se usen x1,...,xn.
     parser_symbols = sp.symbols("x1:51")
     local_dict = {str(v): v for v in parser_symbols}
     local_dict.update(ALLOWED_FUNCS)
@@ -459,16 +442,11 @@ def parse_objective(funcion: str, n: int) -> Objective:
 
 
 def is_affine_objective(obj: Objective) -> bool:
-    """Detecta funciones afines/lineales: Hessiana simbólica nula."""
     try:
         return all(sp.simplify(h) == 0 for row in obj.hess_sym for h in row)
     except Exception:
         return False
 
-
-# -----------------------------------------------------------------------------
-# Búsqueda de línea Wolfe
-# -----------------------------------------------------------------------------
 
 def make_wolfe_search(
     f: Callable[[np.ndarray], float],
@@ -497,13 +475,17 @@ def make_wolfe_search(
         p: np.ndarray,
         phi0: float,
         dphi0: float,
-    ) -> float:
+    ) -> Tuple[float, int]:
         ok_lo, phi_lo = valid_phi(x, p, alpha_lo)
 
         if not ok_lo:
-            return 0.0
+            return 0.0, 0
+
+        zoom_iters = 0
 
         for _ in range(MAX_ZOOM_ITERS):
+            zoom_iters += 1
+
             if abs(alpha_hi - alpha_lo) < 1e-13:
                 break
 
@@ -524,7 +506,7 @@ def make_wolfe_search(
                     continue
 
                 if abs(dphi_a) <= -c2 * dphi0:
-                    return alpha
+                    return alpha, zoom_iters
 
                 if dphi_a * (alpha_hi - alpha_lo) >= 0:
                     alpha_hi = alpha_lo
@@ -532,47 +514,81 @@ def make_wolfe_search(
                 alpha_lo = alpha
                 phi_lo = phi_a
 
-        return max(0.0, 0.5 * (alpha_lo + alpha_hi))
+        return max(0.0, 0.5 * (alpha_lo + alpha_hi)), zoom_iters
 
-    def wolfe_search(x: np.ndarray, p: np.ndarray) -> float:
+    def wolfe_search(x: np.ndarray, p: np.ndarray) -> Tuple[float, AlphaSearchInfo]:
+        alpha_inicial = 1.0
+        info = AlphaSearchInfo(
+            alpha_inicial=alpha_inicial,
+            alpha_aceptado=None,
+            wolfe_iters=0,
+            zoom_iters=0,
+            total_internas=0,
+            modo_alpha="Automático Wolfe",
+        )
+
         try:
             phi0 = f(x)
             dphi0 = float(np.dot(grad(x), p))
         except Exception:
-            return 0.0
+            info.alpha_aceptado = 0.0
+            return 0.0, info
 
         if not np.isfinite(phi0) or not np.isfinite(dphi0) or dphi0 >= 0:
-            return 0.0
+            info.alpha_aceptado = 0.0
+            return 0.0, info
 
         alpha_prev = 0.0
         phi_prev = phi0
-        alpha = 1.0
+        alpha = alpha_inicial
 
         for i in range(MAX_LINESEARCH_ITERS):
+            info.wolfe_iters += 1
+
             ok_a, phi_a = valid_phi(x, p, alpha)
 
             if not ok_a:
-                return zoom(alpha_prev, alpha, x, p, phi0, dphi0)
+                alpha_final, z_iters = zoom(alpha_prev, alpha, x, p, phi0, dphi0)
+                info.zoom_iters += z_iters
+                info.total_internas = info.wolfe_iters + info.zoom_iters
+                info.alpha_aceptado = alpha_final
+                return alpha_final, info
 
             if phi_a > phi0 + c1 * alpha * dphi0 or (i > 0 and phi_a >= phi_prev):
-                return zoom(alpha_prev, alpha, x, p, phi0, dphi0)
+                alpha_final, z_iters = zoom(alpha_prev, alpha, x, p, phi0, dphi0)
+                info.zoom_iters += z_iters
+                info.total_internas = info.wolfe_iters + info.zoom_iters
+                info.alpha_aceptado = alpha_final
+                return alpha_final, info
 
             ok_da, dphi_a = valid_dphi(x, p, alpha)
 
             if not ok_da:
-                return zoom(alpha_prev, alpha, x, p, phi0, dphi0)
+                alpha_final, z_iters = zoom(alpha_prev, alpha, x, p, phi0, dphi0)
+                info.zoom_iters += z_iters
+                info.total_internas = info.wolfe_iters + info.zoom_iters
+                info.alpha_aceptado = alpha_final
+                return alpha_final, info
 
             if abs(dphi_a) <= -c2 * dphi0:
-                return alpha
+                info.total_internas = info.wolfe_iters + info.zoom_iters
+                info.alpha_aceptado = alpha
+                return alpha, info
 
             if dphi_a >= 0:
-                return zoom(alpha, alpha_prev, x, p, phi0, dphi0)
+                alpha_final, z_iters = zoom(alpha, alpha_prev, x, p, phi0, dphi0)
+                info.zoom_iters += z_iters
+                info.total_internas = info.wolfe_iters + info.zoom_iters
+                info.alpha_aceptado = alpha_final
+                return alpha_final, info
 
             alpha_prev = alpha
             phi_prev = phi_a
             alpha = min(2.0 * alpha, MAX_ALPHA)
 
-        return 0.0
+        info.total_internas = info.wolfe_iters + info.zoom_iters
+        info.alpha_aceptado = 0.0
+        return 0.0, info
 
     def verificar_wolfe(x: np.ndarray, p: np.ndarray, alpha: float) -> Tuple[bool, bool]:
         try:
@@ -594,10 +610,6 @@ def make_wolfe_search(
     return wolfe_search, verificar_wolfe
 
 
-# -----------------------------------------------------------------------------
-# Optimización
-# -----------------------------------------------------------------------------
-
 def optimize_objective(
     obj: Objective,
     x0: np.ndarray,
@@ -612,9 +624,18 @@ def optimize_objective(
     f, grad, hess = obj.f, obj.grad, obj.hess
     wolfe_search, verificar_wolfe = make_wolfe_search(f, grad, c1, c2)
 
-    def elegir_alpha(x_actual: np.ndarray, direccion_p: np.ndarray) -> float:
+    def elegir_alpha(x_actual: np.ndarray, direccion_p: np.ndarray) -> Tuple[float, AlphaSearchInfo]:
         if modo_alpha == "Alpha fijo":
-            return float(alpha_fijo)
+            info = AlphaSearchInfo(
+                alpha_inicial=float(alpha_fijo),
+                alpha_aceptado=float(alpha_fijo),
+                wolfe_iters=0,
+                zoom_iters=0,
+                total_internas=0,
+                modo_alpha="Alpha fijo",
+            )
+            return float(alpha_fijo), info
+
         return wolfe_search(x_actual, direccion_p)
 
     records: List[IterRecord] = []
@@ -630,6 +651,7 @@ def optimize_objective(
         w2=None,
         metodo_paso="—",
         beta=None,
+        alpha_info: Optional[AlphaSearchInfo] = None,
     ):
         fx = f(x_val)
         gx = grad(x_val)
@@ -638,18 +660,26 @@ def optimize_objective(
         if is_unstable_state(x_val, fx, gnorm):
             raise FloatingPointError("estado numérico inestable")
 
+        if alpha_info is None:
+            alpha_info = AlphaSearchInfo()
+
         records.append(
             IterRecord(
-                k,
-                x_val.copy(),
-                float(fx),
-                gnorm,
-                alpha,
-                direccion,
-                w1,
-                w2,
-                metodo_paso,
-                beta,
+                iteracion=k,
+                x=x_val.copy(),
+                f=float(fx),
+                grad_norm=gnorm,
+                alpha=alpha,
+                direccion=direccion,
+                wolfe_armijo=w1,
+                wolfe_curvatura=w2,
+                metodo_paso=metodo_paso,
+                beta=beta,
+                alpha_inicial=alpha_info.alpha_inicial,
+                wolfe_iters=alpha_info.wolfe_iters,
+                zoom_iters=alpha_info.zoom_iters,
+                total_internas=alpha_info.total_internas,
+                modo_alpha=alpha_info.modo_alpha,
             )
         )
 
@@ -670,7 +700,7 @@ def optimize_objective(
                 break
 
             p = -g
-            alpha = elegir_alpha(x, p)
+            alpha, alpha_info = elegir_alpha(x, p)
 
             if alpha <= ALPHA_EPS:
                 stop_reason = "paso mínimo alcanzado por la búsqueda de línea"
@@ -680,7 +710,7 @@ def optimize_objective(
             x_new = x + alpha * p
 
             try:
-                add_record(k, x_new, alpha, "-∇f", w1, w2, "Gradiente")
+                add_record(k, x_new, alpha, "-∇f", w1, w2, "Gradiente", alpha_info=alpha_info)
             except Exception:
                 stop_reason = "posible divergencia, salida del dominio o problema no acotado inferiormente"
                 break
@@ -706,12 +736,12 @@ def optimize_objective(
             if restart or np.dot(p, g) >= 0 or not np.all(np.isfinite(p)):
                 p = -g
 
-            alpha = elegir_alpha(x, p)
+            alpha, alpha_info = elegir_alpha(x, p)
             step_name = "CG" if not restart else "reinicio periódico"
 
             if alpha <= ALPHA_EPS:
                 p = -g
-                alpha = elegir_alpha(x, p)
+                alpha, alpha_info = elegir_alpha(x, p)
                 step_name = "reinicio a -∇f"
 
                 if alpha <= ALPHA_EPS:
@@ -734,6 +764,7 @@ def optimize_objective(
                     w2,
                     step_name,
                     beta,
+                    alpha_info=alpha_info,
                 )
             except Exception:
                 stop_reason = "posible divergencia, salida del dominio o problema no acotado inferiormente"
@@ -771,11 +802,11 @@ def optimize_objective(
                 direccion = "-∇f"
                 step_name = "fallback a gradiente"
 
-            alpha = elegir_alpha(x, p)
+            alpha, alpha_info = elegir_alpha(x, p)
 
             if alpha <= ALPHA_EPS and direccion != "-∇f":
                 p = -g
-                alpha = elegir_alpha(x, p)
+                alpha, alpha_info = elegir_alpha(x, p)
                 direccion = "-∇f"
                 step_name = "fallback a gradiente"
 
@@ -787,7 +818,7 @@ def optimize_objective(
             x_new = x + alpha * p
 
             try:
-                add_record(k, x_new, alpha, direccion, w1, w2, step_name)
+                add_record(k, x_new, alpha, direccion, w1, w2, step_name, alpha_info=alpha_info)
             except Exception:
                 stop_reason = "posible divergencia, salida del dominio o problema no acotado inferiormente"
                 break
@@ -835,10 +866,6 @@ def optimize_objective(
     )
 
 
-# -----------------------------------------------------------------------------
-# Gráficos
-# -----------------------------------------------------------------------------
-
 def plot_convergence(records: List[IterRecord], tol: float):
     st.subheader("Convergencia")
 
@@ -853,7 +880,6 @@ def plot_convergence(records: List[IterRecord], tol: float):
 
     def grad_fig(y_data, log_scale: bool):
         fig = go.Figure()
-
         fig.add_trace(
             go.Scatter(
                 x=iters,
@@ -869,14 +895,12 @@ def plot_convergence(records: List[IterRecord], tol: float):
                 ),
             )
         )
-
         fig.add_hline(
             y=tol,
             line_dash="dash",
             annotation_text=f"Tolerancia {tol:.1e}",
             annotation_position="bottom right",
         )
-
         fig.update_layout(
             xaxis_title="Iteración k",
             yaxis_title="‖∇f(xₖ)‖",
@@ -885,7 +909,6 @@ def plot_convergence(records: List[IterRecord], tol: float):
             hovermode="closest",
             margin=dict(l=10, r=10, t=35, b=10),
         )
-
         return fig
 
     with tab_grad_log:
@@ -897,7 +920,6 @@ def plot_convergence(records: List[IterRecord], tol: float):
 
     with tab_fx:
         fig = go.Figure()
-
         fig.add_trace(
             go.Scatter(
                 x=iters,
@@ -913,7 +935,6 @@ def plot_convergence(records: List[IterRecord], tol: float):
                 ),
             )
         )
-
         fig.update_layout(
             xaxis_title="Iteración k",
             yaxis_title="f(xₖ)",
@@ -921,7 +942,6 @@ def plot_convergence(records: List[IterRecord], tol: float):
             hovermode="closest",
             margin=dict(l=10, r=10, t=35, b=10),
         )
-
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -939,6 +959,12 @@ def plot_alpha_wolfe(records: List[IterRecord]):
     w2_vals = [bool(r.wolfe_curvatura) for r in step_records]
     f_vals = [r.f for r in step_records]
     grad_norms = [r.grad_norm for r in step_records]
+
+    alpha_iniciales = [r.alpha_inicial for r in step_records]
+    internas = [r.total_internas for r in step_records]
+    wolfe_iters = [r.wolfe_iters for r in step_records]
+    zoom_iters = [r.zoom_iters for r in step_records]
+    modos_alpha = [r.modo_alpha for r in step_records]
 
     n_steps = len(step_records)
     n_w1 = sum(w1_vals)
@@ -965,18 +991,43 @@ def plot_alpha_wolfe(records: List[IterRecord]):
             x=steps,
             y=alphas,
             mode="lines+markers",
-            name="α",
+            name="α aceptado",
             marker=dict(color=colors, size=10, line=dict(width=0.5)),
             customdata=np.array(
                 [
-                    ["Sí" if w1 else "No", "Sí" if w2 else "No", fval, gval]
-                    for w1, w2, fval, gval in zip(w1_vals, w2_vals, f_vals, grad_norms)
+                    [
+                        "Sí" if w1 else "No",
+                        "Sí" if w2 else "No",
+                        fval,
+                        gval,
+                        alpha_ini,
+                        total_int,
+                        w_iter,
+                        z_iter,
+                        modo,
+                    ]
+                    for w1, w2, fval, gval, alpha_ini, total_int, w_iter, z_iter, modo
+                    in zip(
+                        w1_vals,
+                        w2_vals,
+                        f_vals,
+                        grad_norms,
+                        alpha_iniciales,
+                        internas,
+                        wolfe_iters,
+                        zoom_iters,
+                        modos_alpha,
+                    )
                 ],
                 dtype=object,
             ),
             hovertemplate=(
-                "Paso %{x}<br>"
-                "α=%{y:.8e}<br>"
+                "Iteración externa %{x}<br>"
+                "Modo=%{customdata[8]}<br>"
+                "α inicial=%{customdata[4]:.8e}<br>"
+                "α aceptado=%{y:.8e}<br>"
+                "Iteraciones internas=%{customdata[5]}<br>"
+                "Wolfe=%{customdata[6]} · Zoom=%{customdata[7]}<br>"
                 "Armijo=%{customdata[0]}<br>"
                 "Curvatura=%{customdata[1]}<br>"
                 "f después=%{customdata[2]:.8e}<br>"
@@ -987,8 +1038,8 @@ def plot_alpha_wolfe(records: List[IterRecord]):
     )
 
     fig.update_layout(
-        xaxis_title="Paso k",
-        yaxis_title="αₖ",
+        xaxis_title="Iteración externa k",
+        yaxis_title="α aceptado",
         yaxis_type="log" if alpha_range > 100 else "linear",
         title="Paso α — verde: Wolfe OK · naranja: solo Armijo · rojo: revisar",
         height=400,
@@ -997,6 +1048,20 @@ def plot_alpha_wolfe(records: List[IterRecord]):
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Detalle interno de α por iteración", expanded=False):
+        detalle_alpha = {
+            "Iteración externa": steps,
+            "Modo α": modos_alpha,
+            "α inicial": [fmt(a, ".8e") if a is not None else "—" for a in alpha_iniciales],
+            "α aceptado": [fmt(a, ".8e") for a in alphas],
+            "Iteraciones Wolfe": wolfe_iters,
+            "Iteraciones Zoom": zoom_iters,
+            "Total internas": internas,
+            "Armijo": ["✅" if w else "❌" for w in w1_vals],
+            "Curvatura": ["✅" if w else "❌" for w in w2_vals],
+        }
+        st.dataframe(detalle_alpha, use_container_width=True, hide_index=True)
 
 
 def eval_grid(obj: Objective, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
@@ -1324,7 +1389,6 @@ def plot_geometry(
 
 
 def records_to_csv(records: List[IterRecord]) -> str:
-    """Convierte el historial completo a CSV para descarga."""
     buffer = io.StringIO()
     writer = csv.writer(buffer)
 
@@ -1336,7 +1400,12 @@ def records_to_csv(records: List[IterRecord]) -> str:
         + [
             "f(x)",
             "norma_gradiente",
-            "alpha",
+            "alpha_inicial",
+            "alpha_aceptado",
+            "iteraciones_internas_alpha",
+            "iteraciones_wolfe",
+            "iteraciones_zoom",
+            "modo_alpha",
             "direccion",
             "paso",
             "beta_CG",
@@ -1355,7 +1424,12 @@ def records_to_csv(records: List[IterRecord]) -> str:
             [
                 r.f,
                 r.grad_norm,
+                "" if r.alpha_inicial is None else r.alpha_inicial,
                 "" if r.alpha is None else r.alpha,
+                r.total_internas,
+                r.wolfe_iters,
+                r.zoom_iters,
+                r.modo_alpha,
                 r.direccion,
                 r.metodo_paso,
                 "" if r.beta is None else r.beta,
@@ -1375,7 +1449,12 @@ def show_history(records: List[IterRecord]):
             "x": [vector_to_string(r.x, 8) for r in records],
             "f(x)": [fmt(r.f, ".8e") for r in records],
             "‖∇f‖": [fmt(r.grad_norm, ".6e") for r in records],
-            "α": [fmt(r.alpha, ".8e") if r.alpha is not None else "—" for r in records],
+            "α inicial": [fmt(r.alpha_inicial, ".8e") if r.alpha_inicial is not None else "—" for r in records],
+            "α aceptado": [fmt(r.alpha, ".8e") if r.alpha is not None else "—" for r in records],
+            "Iter. internas α": [r.total_internas for r in records],
+            "Wolfe": [r.wolfe_iters for r in records],
+            "Zoom": [r.zoom_iters for r in records],
+            "Modo α": [r.modo_alpha for r in records],
             "Dirección": [r.direccion for r in records],
             "Paso": [r.metodo_paso for r in records],
             "β CG": [fmt(r.beta, ".6e") if r.beta is not None else "—" for r in records],
@@ -1399,10 +1478,6 @@ def show_history(records: List[IterRecord]):
             use_container_width=True,
         )
 
-
-# -----------------------------------------------------------------------------
-# Interfaz Streamlit
-# -----------------------------------------------------------------------------
 
 def main():
     st.set_page_config(
