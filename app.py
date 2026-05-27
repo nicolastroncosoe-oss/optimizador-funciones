@@ -1,13 +1,9 @@
-"""
-Optimizador de Funciones
-Versión reforzada para uso académico: métodos de Gradiente, Gradiente Conjugado
-no lineal y Newton amortiguado con búsqueda de línea Wolfe.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
+import csv
+import io
 import re
 
 import numpy as np
@@ -496,7 +492,7 @@ def optimize_objective(
     if records[-1].grad_norm < tol:
         stop_reason = "el punto inicial cumple la tolerancia"
     elif is_affine_objective(obj):
-        stop_reason = "función afín sin punto estacionario en el dominio explorado"
+        stop_reason = "función afín: el gradiente es constante y no existe punto estacionario salvo el caso constante"
     elif method == "Gradiente":
         for k in range(1, max_iter + 1):
             g = grad(x)
@@ -826,6 +822,35 @@ def plot_geometry(obj: Objective, records: List[IterRecord], contour_mode: str, 
     st.plotly_chart(fig, use_container_width=True)
 
 
+def records_to_csv(records: List[IterRecord]) -> str:
+    """Convierte el historial completo a CSV para descarga."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    max_dim = max((len(r.x) for r in records), default=0)
+    header = (
+        ["iteracion"]
+        + [f"x{k+1}" for k in range(max_dim)]
+        + ["f(x)", "norma_gradiente", "alpha", "direccion", "paso", "beta_CG", "wolfe_armijo", "wolfe_curvatura"]
+    )
+    writer.writerow(header)
+    for r in records:
+        row = [r.iteracion]
+        row.extend([float(v) for v in r.x])
+        row.extend(["" for _ in range(max_dim - len(r.x))])
+        row.extend([
+            r.f,
+            r.grad_norm,
+            "" if r.alpha is None else r.alpha,
+            r.direccion,
+            r.metodo_paso,
+            "" if r.beta is None else r.beta,
+            "" if r.wolfe_armijo is None else bool(r.wolfe_armijo),
+            "" if r.wolfe_curvatura is None else bool(r.wolfe_curvatura),
+        ])
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
 def show_history(records: List[IterRecord]):
     with st.expander("Ver historial completo de iteraciones", expanded=False):
         table = {
@@ -841,6 +866,13 @@ def show_history(records: List[IterRecord]):
             "Curvatura": ["✅" if r.wolfe_curvatura else "❌" if r.wolfe_curvatura is not None else "—" for r in records],
         }
         st.dataframe(table, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Descargar historial CSV",
+            data=records_to_csv(records).encode("utf-8"),
+            file_name="historial_optimizacion.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -848,82 +880,72 @@ def show_history(records: List[IterRecord]):
 # -----------------------------------------------------------------------------
 
 def main():
-    st.set_page_config(page_title="Optimizador de Funciones", layout="wide")
-    st.title("Optimizador de Funciones")
-    st.caption("Gradiente · Gradiente Conjugado · Newton amortiguado con búsqueda de línea Wolfe")
-
-    st.markdown(
-        """
-        Esta herramienta resuelve problemas de minimización de funciones diferenciables mediante métodos clásicos de optimización numérica.
-        Incluye cálculo simbólico de derivadas, búsqueda de línea Wolfe, clasificación por Hessiana y visualización geométrica del proceso iterativo.
-        Admite expresiones como `sin(x1)`, `exp(x1)`, `e^x1`, `x1*x2`, `x1 x2` y potencias con `^` o `**`.
-        """
-    )
-
+    st.set_page_config(page_title="Optimizador de Funciones", layout="wide", initial_sidebar_state="collapsed")
     ensure_default_state()
 
-    with st.sidebar:
-        st.header("Configuración")
-        example_name = st.selectbox(
-            "Ejemplo rápido",
-            list(EXAMPLES.keys()),
-            index=list(EXAMPLES.keys()).index(st.session_state.get("example_selected", DEFAULT_EXAMPLE)),
-            key="example_selector",
-        )
-        c_load, c_reset = st.columns(2)
-        with c_load:
-            if st.button("Cargar ejemplo", use_container_width=True):
+    st.title("Optimizador de Funciones")
+    st.caption("Por métodos de Gradiente, Gradiente Conjugado y Newton")
+
+    with st.expander("Ejemplos", expanded=False):
+        ex_col1, ex_col2 = st.columns([3, 1])
+        with ex_col1:
+            example_name = st.selectbox(
+                "Elegir ejemplo",
+                list(EXAMPLES.keys()),
+                index=list(EXAMPLES.keys()).index(st.session_state.get("example_selected", DEFAULT_EXAMPLE)),
+                key="example_selector",
+                label_visibility="collapsed",
+            )
+        with ex_col2:
+            if st.button("Cargar", use_container_width=True):
                 load_example_into_state(example_name)
                 update_c2_recommendation()
                 st.rerun()
-        with c_reset:
-            if st.button("Reiniciar", use_container_width=True):
-                load_example_into_state(DEFAULT_EXAMPLE)
-                update_c2_recommendation()
-                st.rerun()
-        st.caption("El botón carga el ejemplo en todos los campos; después puedes modificarlo libremente.")
 
-        n_vars = st.number_input("Número de variables", min_value=1, max_value=5, step=1, key="n_vars")
-        funcion = st.text_area(
-            "Función objetivo",
-            height=90,
-            key="funcion",
-            help="Usa variables x1, x2, ..., x5. Potencias con ^ o **. Productos: x1*x2 o x1 x2; evita x1x2.",
-        )
-        metodos = ["Gradiente", "Gradiente Conjugado", "Newton"]
-        metodo = st.selectbox(
-            "Método de optimización",
-            metodos,
-            key="metodo",
-            on_change=update_c2_recommendation,
-        )
-        punto_inicial = st.text_input(
-            "Punto de partida",
-            key="punto_inicial",
-            help="Valores separados por comas, por ejemplo: 2, -1",
-        )
-        max_iter = st.number_input("Máximo de iteraciones", min_value=1, max_value=50000, step=10, key="max_iter")
-        tolerancia = st.number_input("Tolerancia de convergencia", min_value=1e-14, format="%.2e", key="tolerancia")
-        st.divider()
-        st.subheader("Wolfe")
-        c1_input = st.number_input("c1 Armijo", min_value=1e-8, max_value=0.49, format="%.4f", key="c1_input")
-        c2_input = st.number_input(
-            "c2 curvatura",
-            min_value=0.01,
-            max_value=0.99,
-            format="%.2f",
-            key="c2_input",
-        )
-        st.caption("Valor recomendado: c2=0.4 para Gradiente Conjugado; c2=0.9 para Gradiente y Newton.")
-        st.divider()
-        st.subheader("Gráficos")
-        contour_mode = st.selectbox("Escala del contorno 2D", ["Recorte robusto 2–98%", "Valores reales"], index=0)
-        contour_style = st.selectbox("Estilo del contorno", ["Mapa de calor + líneas", "Solo líneas"], index=0)
-        show_surface = st.checkbox("Mostrar superficie 3D cuando n=2", value=False)
-        run = st.button("Optimizar", type="primary", use_container_width=True)
+    st.subheader("Parámetros")
 
+    funcion = st.text_input(
+        "Función objetivo",
+        key="funcion",
+        help="Usa x1, x2, ..., x5. Ejemplos: x1^2 + x2^2, sin(x1), exp(x1), x1*x2.",
+    )
+
+    col1, col2, col3 = st.columns([1, 1.4, 1.6])
+    with col1:
+        n_vars = st.number_input("Variables", min_value=1, max_value=5, step=1, key="n_vars")
+    with col2:
+        metodo = st.selectbox("Método", ["Gradiente", "Gradiente Conjugado", "Newton"], key="metodo")
+    with col3:
+        punto_inicial = st.text_input("Punto inicial", key="punto_inicial", help="Valores separados por coma. Ejemplo: 2, -1")
+
+    with st.expander("Ajustes avanzados", expanded=False):
+        adv1, adv2, adv3 = st.columns(3)
+        with adv1:
+            max_iter = st.number_input("Máximo de iteraciones", min_value=1, max_value=50000, step=10, key="max_iter")
+            tolerancia = st.number_input("Tolerancia", min_value=1e-14, format="%.2e", key="tolerancia")
+        with adv2:
+            c1_input = st.number_input("Wolfe c1", min_value=1e-8, max_value=0.49, format="%.4f", key="c1_input")
+            c2_input = st.number_input("Wolfe c2", min_value=0.01, max_value=0.99, format="%.2f", key="c2_input")
+            c2_recomendado = 0.4 if st.session_state.get("metodo") == "Gradiente Conjugado" else 0.9
+            if abs(float(st.session_state.get("c2_input", c2_recomendado)) - c2_recomendado) > 1e-12:
+                if st.button(f"Usar c2 recomendado ({c2_recomendado:.1f})"):
+                    st.session_state["c2_input"] = c2_recomendado
+                    st.rerun()
+        with adv3:
+            contour_mode = st.selectbox("Contorno 2D", ["Recorte robusto 2–98%", "Valores reales"], index=0)
+            contour_style = st.selectbox("Estilo", ["Mapa de calor + líneas", "Solo líneas"], index=0)
+            show_surface = st.checkbox("Superficie 3D", value=False)
+
+    max_iter = st.session_state.get("max_iter", 100)
+    tolerancia = st.session_state.get("tolerancia", 1e-8)
+    c1_input = st.session_state.get("c1_input", 1e-4)
+    c2_input = st.session_state.get("c2_input", 0.9)
+    contour_mode = locals().get("contour_mode", "Recorte robusto 2–98%")
+    contour_style = locals().get("contour_style", "Mapa de calor + líneas")
+    show_surface = locals().get("show_surface", False)
+
+    run = st.button("Optimizar", type="primary", use_container_width=True)
     if not run:
-        st.info("Selecciona un ejemplo o escribe tu función y pulsa **Optimizar**.")
         st.stop()
 
     try:
@@ -948,56 +970,61 @@ def main():
         if not np.all(np.isfinite(x0)):
             st.error("El punto de partida contiene valores no finitos.")
             st.stop()
-        # Validación inicial completa.
+
         _ = obj.f(x0)
         _ = obj.grad(x0)
         if metodo == "Newton":
             _ = obj.hess(x0)
-
-        with st.expander("Función y derivadas simbólicas", expanded=False):
-            st.write("**Función objetivo**")
-            st.latex(sp.latex(obj.f_sym))
-            st.write("**Gradiente**")
-            st.latex(sp.latex(sp.Matrix(obj.grad_sym)))
-            if n <= 3:
-                st.write("**Hessiana**")
-                st.latex(sp.latex(sp.Matrix(obj.hess_sym)))
-            else:
-                st.caption("La Hessiana se calculó correctamente; no se muestra completa para conservar claridad visual.")
-            st.caption(obj.smoothness_note)
 
         result = optimize_objective(obj, x0, metodo, max_it, tol, c1, c2)
         records = result.records
         final = records[-1]
         best = records[result.best_index]
 
+        st.divider()
         if result.converged and result.hessian_class == "minimo_local":
-            st.success(f"✅ Candidato a mínimo local encontrado en {final.iteracion} iteraciones.")
+            st.success(f"Resultado encontrado en {final.iteracion} iteraciones.")
         elif result.converged:
-            st.warning(f"Se alcanzó la tolerancia del gradiente. Clasificación final: {result.hessian_message}")
+            st.warning(f"Se alcanzó la tolerancia del gradiente. {result.hessian_message}")
         else:
             st.warning(f"Proceso detenido en la iteración {final.iteracion}. Motivo: {result.stop_reason}.")
+            if metodo == "Gradiente":
+                st.info("Gradiente puede ser lento en funciones mal condicionadas. Prueba Gradiente Conjugado o Newton para acelerar la convergencia.")
 
-        cA, cB, cC, cD, cE = st.columns(5)
+        cA, cB, cC, cD = st.columns(4)
         cA.metric("Iteraciones", final.iteracion)
-        cB.metric("f(x final)", fmt(final.f))
-        cC.metric("‖∇f‖ final", fmt(final.grad_norm, ".2e"))
-        cD.metric("f mejor", fmt(best.f))
-        cE.metric("Tolerancia", f"{tol:.1e}")
+        cB.metric("f(x)", fmt(final.f))
+        cC.metric("‖∇f‖", fmt(final.grad_norm, ".2e"))
+        cD.metric("Tolerancia", f"{tol:.1e}")
 
         st.write(f"**Punto final:** `{vector_to_string(final.x, 10)}`")
         if result.best_index != len(records) - 1:
             st.write(f"**Mejor punto observado:** `{vector_to_string(best.x, 10)}` con `f={fmt(best.f)}`")
 
-        with st.expander("Clasificación del punto final", expanded=True):
-            st.write(result.hessian_message)
+        tab_res, tab_graph, tab_extra = st.tabs(["Resumen", "Gráficos", "Detalles"])
+        with tab_res:
+            st.write("**Clasificación:**", result.hessian_message)
             if result.eigvals is not None:
                 st.write(f"Valores propios de la Hessiana: `{vector_to_string(result.eigvals, 8)}`")
+            plot_convergence(records, tol)
 
-        plot_convergence(records, tol)
-        plot_alpha_wolfe(records)
-        plot_geometry(obj, records, contour_mode, contour_style, show_surface)
-        show_history(records)
+        with tab_graph:
+            plot_geometry(obj, records, contour_mode, contour_style, show_surface)
+
+        with tab_extra:
+            with st.expander("Función y derivadas", expanded=False):
+                st.write("**Función objetivo**")
+                st.latex(sp.latex(obj.f_sym))
+                st.write("**Gradiente**")
+                st.latex(sp.latex(sp.Matrix(obj.grad_sym)))
+                if n <= 3:
+                    st.write("**Hessiana**")
+                    st.latex(sp.latex(sp.Matrix(obj.hess_sym)))
+                else:
+                    st.caption("La Hessiana se calculó correctamente; no se muestra completa para conservar claridad visual.")
+            with st.expander("Paso α y condiciones de Wolfe", expanded=False):
+                plot_alpha_wolfe(records)
+            show_history(records)
 
     except ValueError as e:
         st.error(str(e))
