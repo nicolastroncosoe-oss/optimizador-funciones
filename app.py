@@ -134,6 +134,8 @@ def ensure_default_state() -> None:
 
     st.session_state.setdefault("c1_input", 1e-4)
     st.session_state.setdefault("c2_input", 0.9)
+    st.session_state.setdefault("modo_alpha", "Automático Wolfe")
+    st.session_state.setdefault("alpha_fijo", 0.1)
 
 
 def update_c2_recommendation() -> None:
@@ -604,9 +606,16 @@ def optimize_objective(
     tol: float,
     c1: float,
     c2: float,
+    modo_alpha: str = "Automático Wolfe",
+    alpha_fijo: float = 0.1,
 ) -> OptimizationResult:
     f, grad, hess = obj.f, obj.grad, obj.hess
     wolfe_search, verificar_wolfe = make_wolfe_search(f, grad, c1, c2)
+
+    def elegir_alpha(x_actual: np.ndarray, direccion_p: np.ndarray) -> float:
+        if modo_alpha == "Alpha fijo":
+            return float(alpha_fijo)
+        return wolfe_search(x_actual, direccion_p)
 
     records: List[IterRecord] = []
     x = np.asarray(x0, dtype=float).copy()
@@ -661,7 +670,7 @@ def optimize_objective(
                 break
 
             p = -g
-            alpha = wolfe_search(x, p)
+            alpha = elegir_alpha(x, p)
 
             if alpha <= ALPHA_EPS:
                 stop_reason = "paso mínimo alcanzado por la búsqueda de línea"
@@ -697,12 +706,12 @@ def optimize_objective(
             if restart or np.dot(p, g) >= 0 or not np.all(np.isfinite(p)):
                 p = -g
 
-            alpha = wolfe_search(x, p)
+            alpha = elegir_alpha(x, p)
             step_name = "CG" if not restart else "reinicio periódico"
 
             if alpha <= ALPHA_EPS:
                 p = -g
-                alpha = wolfe_search(x, p)
+                alpha = elegir_alpha(x, p)
                 step_name = "reinicio a -∇f"
 
                 if alpha <= ALPHA_EPS:
@@ -762,11 +771,11 @@ def optimize_objective(
                 direccion = "-∇f"
                 step_name = "fallback a gradiente"
 
-            alpha = wolfe_search(x, p)
+            alpha = elegir_alpha(x, p)
 
             if alpha <= ALPHA_EPS and direccion != "-∇f":
                 p = -g
-                alpha = wolfe_search(x, p)
+                alpha = elegir_alpha(x, p)
                 direccion = "-∇f"
                 step_name = "fallback a gradiente"
 
@@ -1474,6 +1483,20 @@ def main():
             )
 
         with adv2:
+            modo_alpha = st.selectbox(
+                "Alpha",
+                ["Automático Wolfe", "Alpha fijo"],
+                key="modo_alpha",
+            )
+
+            alpha_fijo = st.number_input(
+                "Valor de alpha fijo",
+                min_value=1e-12,
+                max_value=100.0,
+                format="%.6f",
+                key="alpha_fijo",
+            )
+
             c1_input = st.number_input(
                 "Wolfe c1",
                 min_value=1e-8,
@@ -1516,6 +1539,8 @@ def main():
     tolerancia = st.session_state.get("tolerancia", 1e-8)
     c1_input = st.session_state.get("c1_input", 1e-4)
     c2_input = st.session_state.get("c2_input", 0.9)
+    modo_alpha = st.session_state.get("modo_alpha", "Automático Wolfe")
+    alpha_fijo = st.session_state.get("alpha_fijo", 0.1)
     contour_mode = locals().get("contour_mode", "Recorte robusto 2–98%")
     contour_style = locals().get("contour_style", "Mapa de calor + líneas")
     show_surface = locals().get("show_surface", False)
@@ -1531,6 +1556,8 @@ def main():
         tol = float(tolerancia)
         c1 = float(c1_input)
         c2 = float(c2_input)
+        modo_alpha = str(modo_alpha)
+        alpha_fijo = float(alpha_fijo)
 
         if not (0 < c1 < c2 < 1):
             st.error(
@@ -1541,6 +1568,10 @@ def main():
 
         if tol <= 0:
             st.error("La tolerancia debe ser estrictamente positiva.")
+            st.stop()
+
+        if modo_alpha == "Alpha fijo" and alpha_fijo <= 0:
+            st.error("El alpha fijo debe ser estrictamente positivo.")
             st.stop()
 
         obj = parse_objective(funcion, n)
@@ -1563,7 +1594,17 @@ def main():
         if metodo == "Newton":
             _ = obj.hess(x0)
 
-        result = optimize_objective(obj, x0, metodo, max_it, tol, c1, c2)
+        result = optimize_objective(
+            obj=obj,
+            x0=x0,
+            method=metodo,
+            max_iter=max_it,
+            tol=tol,
+            c1=c1,
+            c2=c2,
+            modo_alpha=modo_alpha,
+            alpha_fijo=alpha_fijo,
+        )
 
         records = result.records
         final = records[-1]
@@ -1594,6 +1635,11 @@ def main():
         cD.metric("Tolerancia", f"{tol:.1e}")
 
         st.write(f"**Punto final:** `{vector_to_string(final.x, 10)}`")
+
+        if modo_alpha == "Alpha fijo":
+            st.write(f"**Alpha utilizado:** fijo, `α = {alpha_fijo}`")
+        else:
+            st.write("**Alpha utilizado:** automático por búsqueda de línea Wolfe")
 
         if result.best_index != len(records) - 1:
             st.write(
