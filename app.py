@@ -135,6 +135,7 @@ def load_example_into_state(example_name: str) -> None:
 def ensure_default_state() -> None:
     if "example_selected" not in st.session_state:
         load_example_into_state(DEFAULT_EXAMPLE)
+
     st.session_state.setdefault("c1_input", 1e-4)
     st.session_state.setdefault("c2_input", 0.9)
     st.session_state.setdefault("modo_alpha", "Automático Wolfe")
@@ -217,6 +218,7 @@ class OptimizationResult:
 def fmt(v, fmt_spec: str = ".4e") -> str:
     if v is None:
         return "—"
+
     try:
         vf = float(v)
         if not np.isfinite(vf):
@@ -228,15 +230,20 @@ def fmt(v, fmt_spec: str = ".4e") -> str:
 
 def finite_float(value) -> float:
     arr = np.asarray(value)
+
     if arr.size != 1:
         arr = np.squeeze(arr)
+
     if np.iscomplexobj(arr):
         if np.max(np.abs(np.imag(arr))) > 1e-10:
             raise ValueError("La evaluación produjo un valor complejo.")
         arr = np.real(arr)
+
     out = float(np.asarray(arr, dtype=float))
+
     if not np.isfinite(out):
         raise ValueError("La evaluación produjo NaN o infinito.")
+
     return out
 
 
@@ -246,15 +253,19 @@ def safe_eval_f(f_raw: Callable, x: np.ndarray) -> float:
 
 def safe_eval_grad(grad_raw: Sequence[Callable], x: np.ndarray) -> np.ndarray:
     vals = np.array([finite_float(g(*x)) for g in grad_raw], dtype=float)
+
     if not np.all(np.isfinite(vals)):
         raise ValueError("El gradiente contiene NaN o infinito.")
+
     return vals
 
 
 def safe_eval_hess(hess_raw: Sequence[Sequence[Callable]], x: np.ndarray) -> np.ndarray:
     H = np.array([[finite_float(h(*x)) for h in row] for row in hess_raw], dtype=float)
+
     if not np.all(np.isfinite(H)):
         raise ValueError("La Hessiana contiene NaN o infinito.")
+
     return H
 
 
@@ -264,11 +275,13 @@ def vector_to_string(x: np.ndarray, precision: int = 8) -> str:
 
 def safe_log_values(values: Sequence[float], floor: float = LOG_FLOOR) -> List[Optional[float]]:
     out: List[Optional[float]] = []
+
     for v in values:
         if v is None or not np.isfinite(v):
             out.append(None)
         else:
             out.append(max(float(v), floor))
+
     return out
 
 
@@ -286,17 +299,23 @@ def is_unstable_state(x: np.ndarray, fx: float, grad_norm: float) -> bool:
 def robust_range(values: np.ndarray, min_pad: float = 1.0, max_span: float = 1e6) -> Tuple[float, float]:
     vals = np.asarray(values, dtype=float)
     vals = vals[np.isfinite(vals)]
+
     if vals.size == 0:
         return -min_pad, min_pad
+
     lo, hi = np.percentile(vals, [2, 98]) if vals.size >= 5 else (np.min(vals), np.max(vals))
+
     if not np.isfinite(lo) or not np.isfinite(hi):
         return -min_pad, min_pad
+
     if abs(hi - lo) < 1e-12:
         center = 0.5 * (hi + lo)
         return center - min_pad, center + min_pad
+
     center = 0.5 * (hi + lo)
     span = min(abs(hi - lo), max_span)
     pad = max(min_pad, 0.25 * span)
+
     return center - 0.5 * span - pad, center + 0.5 * span + pad
 
 
@@ -314,8 +333,10 @@ def parse_objective(funcion: str, n: int) -> Objective:
         raise ValueError("Ingresa una función objetivo.")
 
     indices_usados = detectar_variables_escritas(funcion)
+
     if indices_usados:
         max_indice = max(indices_usados)
+
         if max_indice > n:
             variables_fuera = [f"x{i}" for i in indices_usados if i > n]
             raise ValueError(
@@ -324,11 +345,12 @@ def parse_objective(funcion: str, n: int) -> Objective:
             )
 
     variables = sp.symbols(f"x1:{n + 1}")
+
     if n == 1 and not isinstance(variables, tuple):
         variables = (variables,)
+
     variables = tuple(variables)
 
-    # Se registran x1,...,x50 para impedir que SymPy parta x10 como x*10.
     parser_symbols = sp.symbols("x1:51")
     local_dict = {str(v): v for v in parser_symbols}
     local_dict.update(ALLOWED_FUNCS)
@@ -348,11 +370,14 @@ def parse_objective(funcion: str, n: int) -> Objective:
         )
 
     extras = f_sym.free_symbols - set(variables)
+
     if extras:
         extra_names = sorted(str(e) for e in extras)
         product_hint = ""
+
         if re.search(r"x\d+x\d+", funcion.replace(" ", "")):
             product_hint = " Para multiplicar variables escribe x1*x2 o x1 x2; no escribas x1x2."
+
         raise ValueError(
             f"La función usa variables no permitidas: {extra_names}. "
             f"Usa solamente x1,...,x{n}." + product_hint
@@ -395,6 +420,7 @@ def classify_hessian(
     eig_tol: float = 1e-8,
 ) -> Tuple[str, str, Optional[np.ndarray]]:
     stationary_threshold = max(10.0 * float(tol), 1e-8)
+
     if grad_norm is None or (not np.isfinite(grad_norm)) or float(grad_norm) > stationary_threshold:
         return (
             "no_estacionario",
@@ -416,10 +442,13 @@ def classify_hessian(
 
     if min_eig > eig_tol:
         return "minimo_local", "Hessiana definida positiva: candidato fuerte a mínimo local.", eigvals
+
     if max_eig < -eig_tol:
         return "maximo_local", "Hessiana definida negativa en un punto estacionario: candidato a máximo local.", eigvals
+
     if min_eig < -eig_tol and max_eig > eig_tol:
         return "silla", "Hessiana indefinida en un punto estacionario: punto silla.", eigvals
+
     return (
         "degenerado",
         "La Hessiana es semidefinida o casi singular. El gradiente cumple la tolerancia, pero la prueba de segundo orden no es concluyente.",
@@ -460,31 +489,43 @@ def make_wolfe_search(
         dphi0: float,
     ) -> Tuple[float, int]:
         ok_lo, phi_lo = valid_phi(x, p, alpha_lo)
+
         if not ok_lo:
             return 0.0, 0
+
         zoom_iters = 0
+
         for _ in range(MAX_ZOOM_ITERS):
             zoom_iters += 1
+
             if abs(alpha_hi - alpha_lo) < 1e-13:
                 break
+
             alpha = 0.5 * (alpha_lo + alpha_hi)
             ok_a, phi_a = valid_phi(x, p, alpha)
+
             if not ok_a:
                 alpha_hi = alpha
                 continue
+
             if phi_a > phi0 + c1 * alpha * dphi0 or phi_a >= phi_lo:
                 alpha_hi = alpha
             else:
                 ok_da, dphi_a = valid_dphi(x, p, alpha)
+
                 if not ok_da:
                     alpha_hi = alpha
                     continue
+
                 if abs(dphi_a) <= -c2 * dphi0:
                     return alpha, zoom_iters
+
                 if dphi_a * (alpha_hi - alpha_lo) >= 0:
                     alpha_hi = alpha_lo
+
                 alpha_lo = alpha
                 phi_lo = phi_a
+
         return max(0.0, 0.5 * (alpha_lo + alpha_hi)), zoom_iters
 
     def wolfe_search(x: np.ndarray, p: np.ndarray) -> Tuple[float, AlphaSearchInfo]:
@@ -497,6 +538,7 @@ def make_wolfe_search(
             total_internas=0,
             modo_alpha="Automático Wolfe",
         )
+
         try:
             phi0 = f(x)
             dphi0 = float(np.dot(grad(x), p))
@@ -515,35 +557,42 @@ def make_wolfe_search(
         for i in range(MAX_LINESEARCH_ITERS):
             info.wolfe_iters += 1
             ok_a, phi_a = valid_phi(x, p, alpha)
+
             if not ok_a:
                 alpha_final, z_iters = zoom(alpha_prev, alpha, x, p, phi0, dphi0)
                 info.zoom_iters += z_iters
                 info.total_internas = info.wolfe_iters + info.zoom_iters
                 info.alpha_aceptado = alpha_final
                 return alpha_final, info
+
             if phi_a > phi0 + c1 * alpha * dphi0 or (i > 0 and phi_a >= phi_prev):
                 alpha_final, z_iters = zoom(alpha_prev, alpha, x, p, phi0, dphi0)
                 info.zoom_iters += z_iters
                 info.total_internas = info.wolfe_iters + info.zoom_iters
                 info.alpha_aceptado = alpha_final
                 return alpha_final, info
+
             ok_da, dphi_a = valid_dphi(x, p, alpha)
+
             if not ok_da:
                 alpha_final, z_iters = zoom(alpha_prev, alpha, x, p, phi0, dphi0)
                 info.zoom_iters += z_iters
                 info.total_internas = info.wolfe_iters + info.zoom_iters
                 info.alpha_aceptado = alpha_final
                 return alpha_final, info
+
             if abs(dphi_a) <= -c2 * dphi0:
                 info.total_internas = info.wolfe_iters + info.zoom_iters
                 info.alpha_aceptado = alpha
                 return alpha, info
+
             if dphi_a >= 0:
                 alpha_final, z_iters = zoom(alpha, alpha_prev, x, p, phi0, dphi0)
                 info.zoom_iters += z_iters
                 info.total_internas = info.wolfe_iters + info.zoom_iters
                 info.alpha_aceptado = alpha_final
                 return alpha_final, info
+
             alpha_prev = alpha
             phi_prev = phi_a
             alpha = min(2.0 * alpha, MAX_ALPHA_WOLFE)
@@ -558,8 +607,10 @@ def make_wolfe_search(
             dphi0 = float(np.dot(grad(x), p))
             phi_a = f(x + alpha * p)
             dphi_a = float(np.dot(grad(x + alpha * p), p))
+
             if not all(np.isfinite(v) for v in [phi0, dphi0, phi_a, dphi_a]):
                 return False, False
+
             return (
                 bool(phi_a <= phi0 + c1 * alpha * dphi0),
                 bool(abs(dphi_a) <= c2 * abs(dphi0)),
@@ -568,7 +619,9 @@ def make_wolfe_search(
             return False, False
 
     return wolfe_search, verificar_wolfe
-    # =============================================================================
+
+
+# =============================================================================
 # Optimización
 # =============================================================================
 
@@ -597,6 +650,7 @@ def optimize_objective(
                 modo_alpha="Alpha fijo",
             )
             return float(alpha_fijo), info
+
         return wolfe_search(x_actual, direccion_p)
 
     records: List[IterRecord] = []
@@ -655,6 +709,7 @@ def optimize_objective(
     elif method == "Gradiente":
         for k in range(1, max_iter + 1):
             g = grad(x)
+
             if float(np.linalg.norm(g)) < tol:
                 stop_reason = "tolerancia alcanzada"
                 break
@@ -715,6 +770,7 @@ def optimize_objective(
                 g_new = grad(x_new)
                 denom = float(np.dot(g, g))
                 beta = max(0.0, float(np.dot(g_new, g_new - g)) / denom) if denom > 1e-24 else 0.0
+
                 add_record(
                     k,
                     x_new,
@@ -740,6 +796,7 @@ def optimize_objective(
     elif method == "Newton":
         for k in range(1, max_iter + 1):
             g = grad(x)
+
             if float(np.linalg.norm(g)) < tol:
                 stop_reason = "tolerancia alcanzada"
                 break
@@ -840,6 +897,7 @@ def plot_convergence(records: List[IterRecord], tol: float):
 
     def grad_fig(y_data, log_scale: bool):
         fig = go.Figure()
+
         fig.add_trace(
             go.Scatter(
                 x=iters,
@@ -855,12 +913,14 @@ def plot_convergence(records: List[IterRecord], tol: float):
                 ),
             )
         )
+
         fig.add_hline(
             y=tol,
             line_dash="dash",
             annotation_text=f"Tolerancia {tol:.1e}",
             annotation_position="bottom right",
         )
+
         fig.update_layout(
             xaxis_title="Iteración k",
             yaxis_title="‖∇f(xₖ)‖",
@@ -869,6 +929,7 @@ def plot_convergence(records: List[IterRecord], tol: float):
             hovermode="closest",
             margin=dict(l=10, r=10, t=35, b=10),
         )
+
         return fig
 
     with tab_grad_log:
@@ -880,6 +941,7 @@ def plot_convergence(records: List[IterRecord], tol: float):
 
     with tab_fx:
         fig = go.Figure()
+
         fig.add_trace(
             go.Scatter(
                 x=iters,
@@ -895,6 +957,7 @@ def plot_convergence(records: List[IterRecord], tol: float):
                 ),
             )
         )
+
         fig.update_layout(
             xaxis_title="Iteración k",
             yaxis_title="f(xₖ)",
@@ -902,11 +965,13 @@ def plot_convergence(records: List[IterRecord], tol: float):
             hovermode="closest",
             margin=dict(l=10, r=10, t=35, b=10),
         )
+
         st.plotly_chart(fig, use_container_width=True)
 
 
 def plot_alpha_wolfe(records: List[IterRecord]):
     step_records = [r for r in records if r.alpha is not None]
+
     if not step_records:
         return
 
@@ -944,6 +1009,7 @@ def plot_alpha_wolfe(records: List[IterRecord]):
     use_log_alpha = all(a > 0 for a in alphas) and (alpha_range > 100 or alpha_max < 1e-2)
 
     fig = go.Figure()
+
     fig.add_trace(
         go.Scatter(
             x=steps,
@@ -1004,6 +1070,7 @@ def plot_alpha_wolfe(records: List[IterRecord]):
         hovermode="closest",
         margin=dict(l=10, r=10, t=50, b=10),
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
     with st.expander("Detalle interno de α por iteración", expanded=False):
@@ -1018,6 +1085,7 @@ def plot_alpha_wolfe(records: List[IterRecord]):
             "Armijo": ["✅" if w else "❌" for w in w1_vals],
             "Curvatura": ["✅" if w else "❌" for w in w2_vals],
         }
+
         st.dataframe(detalle_alpha, use_container_width=True, hide_index=True)
 
 
@@ -1025,18 +1093,23 @@ def eval_grid(obj: Objective, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
     try:
         Z = obj.f_raw(X, Y)
         Z = np.asarray(Z, dtype=float)
+
         if Z.shape != X.shape:
             Z = np.full_like(X, float(Z), dtype=float)
+
         Z[~np.isfinite(Z)] = np.nan
         return Z
+
     except Exception:
         Z = np.full_like(X, np.nan, dtype=float)
+
         for i in range(X.shape[0]):
             for j in range(X.shape[1]):
                 try:
                     Z[i, j] = obj.f(np.array([X[i, j], Y[i, j]], dtype=float))
                 except Exception:
                     pass
+
         return Z
 
 
@@ -1050,6 +1123,7 @@ def add_arrows(fig: go.Figure, tray: np.ndarray, max_arrows: int = 25):
     for i in range(0, len(tray) - 1, step):
         x0, y0 = tray[i, 0], tray[i, 1]
         x1, y1 = tray[i + 1, 0], tray[i + 1, 1]
+
         if np.all(np.isfinite([x0, y0, x1, y1])):
             annotations.append(
                 dict(
@@ -1068,6 +1142,7 @@ def add_arrows(fig: go.Figure, tray: np.ndarray, max_arrows: int = 25):
                     opacity=0.75,
                 )
             )
+
     fig.update_layout(annotations=annotations)
 
 
@@ -1097,6 +1172,7 @@ def plot_geometry(
                 pass
 
         fig = go.Figure()
+
         fig.add_trace(
             go.Scatter(
                 x=xs,
@@ -1106,6 +1182,7 @@ def plot_geometry(
                 hovertemplate="x1=%{x:.8g}<br>f=%{y:.8e}<extra></extra>",
             )
         )
+
         fig.add_trace(
             go.Scatter(
                 x=xs_path,
@@ -1122,6 +1199,7 @@ def plot_geometry(
                 ),
             )
         )
+
         fig.add_trace(
             go.Scatter(
                 x=[xs_path[0]],
@@ -1131,6 +1209,7 @@ def plot_geometry(
                 name="Inicio",
             )
         )
+
         fig.add_trace(
             go.Scatter(
                 x=[xs_path[-1]],
@@ -1140,6 +1219,7 @@ def plot_geometry(
                 name="Punto final",
             )
         )
+
         fig.update_layout(
             xaxis_title="x1",
             yaxis_title="f(x1)",
@@ -1147,6 +1227,7 @@ def plot_geometry(
             hovermode="closest",
             margin=dict(l=10, r=10, t=35, b=10),
         )
+
         st.plotly_chart(fig, use_container_width=True)
         return
 
@@ -1167,10 +1248,12 @@ def plot_geometry(
 
         if contour_mode == "Recorte robusto 2–98%" and z_finite.size > 10:
             z_low, z_high = np.percentile(z_finite, [2, 98])
+
             if abs(z_high - z_low) < 1e-14:
                 z_low, z_high = np.min(z_finite), np.max(z_finite)
+
             Z_show = np.clip(Z, z_low, z_high)
-            subtitle = "Visualización con recorte robusto para resaltar la geometría local."
+            subtitle = "Visualización robusta para resaltar la geometría local."
             z_label = "valor visualizado"
         else:
             Z_show = Z
@@ -1180,6 +1263,7 @@ def plot_geometry(
         coloring = "heatmap" if contour_style == "Mapa de calor + líneas" else "lines"
 
         fig = go.Figure()
+
         fig.add_trace(
             go.Contour(
                 x=xx,
@@ -1197,6 +1281,7 @@ def plot_geometry(
                 ),
             )
         )
+
         fig.add_trace(
             go.Scatter(
                 x=tray[:, 0],
@@ -1215,6 +1300,7 @@ def plot_geometry(
                 ),
             )
         )
+
         fig.add_trace(
             go.Scatter(
                 x=[tray[0, 0]],
@@ -1224,6 +1310,7 @@ def plot_geometry(
                 name="Inicio",
             )
         )
+
         fig.add_trace(
             go.Scatter(
                 x=[tray[-1, 0]],
@@ -1244,16 +1331,12 @@ def plot_geometry(
             margin=dict(l=10, r=10, t=40, b=10),
             title=subtitle,
         )
-        st.plotly_chart(fig, use_container_width=True)
 
-        if contour_mode == "Recorte robusto 2–98%":
-            st.caption(
-                "El color del contorno usa valores recortados entre percentiles 2 y 98; "
-                "la trayectoria conserva f(x) real en el hover."
-            )
+        st.plotly_chart(fig, use_container_width=True)
 
         if show_surface:
             st.subheader("Superficie 3D")
+
             fig3 = go.Figure(
                 data=[
                     go.Surface(
@@ -1266,6 +1349,7 @@ def plot_geometry(
                     )
                 ]
             )
+
             fig3.add_trace(
                 go.Scatter3d(
                     x=tray[:, 0],
@@ -1277,6 +1361,7 @@ def plot_geometry(
                     line=dict(width=5),
                 )
             )
+
             fig3.update_layout(
                 height=650,
                 scene=dict(
@@ -1286,11 +1371,13 @@ def plot_geometry(
                 ),
                 margin=dict(l=10, r=10, t=35, b=10),
             )
+
             st.plotly_chart(fig3, use_container_width=True)
 
         return
 
     st.subheader("Evolución de variables")
+
     fig = go.Figure()
     iters = [r.iteracion for r in records]
     use_markers = len(records) <= 100
@@ -1313,6 +1400,7 @@ def plot_geometry(
         hovermode="closest",
         margin=dict(l=10, r=10, t=35, b=10),
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1344,6 +1432,7 @@ def records_to_csv(records: List[IterRecord]) -> str:
             "wolfe_curvatura",
         ]
     )
+
     writer.writerow(header)
 
     for r in records:
@@ -1367,6 +1456,7 @@ def records_to_csv(records: List[IterRecord]) -> str:
                 "" if r.wolfe_curvatura is None else bool(r.wolfe_curvatura),
             ]
         )
+
         writer.writerow(row)
 
     return buffer.getvalue()
@@ -1397,6 +1487,7 @@ def show_history(records: List[IterRecord]):
                 for r in records
             ],
         }
+
         st.dataframe(table, use_container_width=True, hide_index=True)
 
         st.download_button(
@@ -1426,6 +1517,7 @@ def main():
 
     with st.expander("Ejemplos", expanded=False):
         ex_col1, ex_col2 = st.columns([3, 1])
+
         with ex_col1:
             example_name = st.selectbox(
                 "Elegir ejemplo",
@@ -1434,6 +1526,7 @@ def main():
                 key="example_selector",
                 label_visibility="collapsed",
             )
+
         with ex_col2:
             if st.button("Cargar", use_container_width=True):
                 load_example_into_state(example_name)
@@ -1449,10 +1542,13 @@ def main():
     )
 
     col1, col2, col3 = st.columns([1, 1.4, 1.6])
+
     with col1:
         n_vars = st.number_input("Variables", min_value=1, max_value=10, step=1, key="n_vars")
+
     with col2:
         metodo = st.selectbox("Método", METHODS, key="metodo")
+
     with col3:
         punto_inicial = st.text_input(
             "Punto inicial",
@@ -1471,6 +1567,7 @@ def main():
                 step=10,
                 key="max_iter",
             )
+
             tolerancia = st.number_input(
                 "Tolerancia",
                 min_value=1e-14,
@@ -1480,6 +1577,7 @@ def main():
 
         with adv2:
             modo_alpha = st.selectbox("Alpha", ALPHA_MODES, key="modo_alpha")
+
             alpha_fijo = st.number_input(
                 "Valor de alpha fijo",
                 min_value=1e-12,
@@ -1487,6 +1585,7 @@ def main():
                 format="%.6f",
                 key="alpha_fijo",
             )
+
             c1_input = st.number_input(
                 "Wolfe c1",
                 min_value=1e-8,
@@ -1494,6 +1593,7 @@ def main():
                 format="%.4f",
                 key="c1_input",
             )
+
             c2_input = st.number_input(
                 "Wolfe c2",
                 min_value=0.01,
@@ -1501,23 +1601,21 @@ def main():
                 format="%.2f",
                 key="c2_input",
             )
+
             c2_recomendado = 0.4 if st.session_state.get("metodo") == "Gradiente Conjugado" else 0.9
+
             if abs(float(st.session_state.get("c2_input", c2_recomendado)) - c2_recomendado) > 1e-12:
                 if st.button(f"Usar c2 recomendado ({c2_recomendado:.1f})"):
                     st.session_state["c2_input"] = c2_recomendado
                     st.rerun()
 
         with adv3:
-            contour_mode = st.selectbox(
-                "Contorno 2D",
-                ["Recorte robusto 2–98%", "Valores reales"],
-                index=0,
-            )
             contour_style = st.selectbox(
-                "Estilo",
+                "Estilo del gráfico 2D",
                 ["Mapa de calor + líneas", "Solo líneas"],
                 index=0,
             )
+
             show_surface = st.checkbox("Superficie 3D", value=False)
 
     max_iter = st.session_state.get("max_iter", 100)
@@ -1526,11 +1624,13 @@ def main():
     c2_input = st.session_state.get("c2_input", 0.9)
     modo_alpha = st.session_state.get("modo_alpha", "Automático Wolfe")
     alpha_fijo = st.session_state.get("alpha_fijo", 0.1)
-    contour_mode = locals().get("contour_mode", "Recorte robusto 2–98%")
+
+    contour_mode = "Recorte robusto 2–98%"
     contour_style = locals().get("contour_style", "Mapa de calor + líneas")
     show_surface = locals().get("show_surface", False)
 
     run = st.button("Optimizar", type="primary", use_container_width=True)
+
     if not run:
         st.stop()
 
@@ -1558,17 +1658,20 @@ def main():
         obj = parse_objective(funcion, n)
 
         parts = [v.strip() for v in punto_inicial.split(",") if v.strip()]
+
         if len(parts) != n:
             st.error(f"El punto de partida debe tener {n} valores. Tiene {len(parts)}.")
             st.stop()
 
         x0 = np.array([float(v) for v in parts], dtype=float)
+
         if not np.all(np.isfinite(x0)):
             st.error("El punto de partida contiene valores no finitos.")
             st.stop()
 
         _ = obj.f(x0)
         _ = obj.grad(x0)
+
         if metodo == "Newton":
             _ = obj.hess(x0)
 
@@ -1592,10 +1695,13 @@ def main():
 
         if result.converged and result.hessian_class == "minimo_local":
             st.success(f"Resultado encontrado en {final.iteracion} iteraciones.")
+
         elif result.converged:
             st.warning(f"Se alcanzó la tolerancia del gradiente. {result.hessian_message}")
+
         else:
             st.warning(f"Proceso detenido en la iteración {final.iteracion}. Motivo: {result.stop_reason}.")
+
             if metodo == "Gradiente":
                 st.info("Gradiente puede ser lento en funciones mal condicionadas. Prueba Gradiente Conjugado o Newton.")
 
@@ -1619,8 +1725,10 @@ def main():
 
         with tab_res:
             st.write("**Clasificación:**", result.hessian_message)
+
             if result.eigvals is not None:
                 st.write(f"Valores propios de la Hessiana: `{vector_to_string(result.eigvals, 8)}`")
+
             plot_convergence(records, tol)
 
         with tab_graph:
@@ -1630,8 +1738,10 @@ def main():
             with st.expander("Función y derivadas", expanded=False):
                 st.write("**Función objetivo**")
                 st.latex(sp.latex(obj.f_sym))
+
                 st.write("**Gradiente**")
                 st.latex(sp.latex(sp.Matrix(obj.grad_sym)))
+
                 if n <= 3:
                     st.write("**Hessiana**")
                     st.latex(sp.latex(sp.Matrix(obj.hess_sym)))
@@ -1648,7 +1758,9 @@ def main():
 
     except Exception as e:
         import traceback
+
         st.error(f"Error inesperado: {e}")
+
         with st.expander("Detalle técnico"):
             st.code(traceback.format_exc())
 
